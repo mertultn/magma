@@ -1,0 +1,28 @@
+# Genel
+.DS_Store
+.env
+.env.*
+*.log
+*.tmp
+*.swp
+
+# Node / frontend
+client/**/node_modules/
+client/**/dist/
+client/**/dist-ssr/
+client/**/*.local
+
+# Rust / Tauri
+client/**/target/
+client/**/src-tauri/target/
+client/**/src-tauri/gen/schemas/
+
+# Database / local artifacts
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+
+# IDE
+.vscode/
+.idea/
