@@ -26,3 +26,4 @@ client/**/src-tauri/gen/schemas/
 # IDE
 .vscode/
 .idea/
+.aider*

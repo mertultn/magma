@@ -1,0 +1,17 @@
+{
+  "name": "Magma",
+  "version": "1.0.0",
+  "description": "Magma sohbet uygulamasi sunucusu",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "@libsql/client": "^0.17.4",
+    "bcrypt": "^6.0.0",
+    "ws": "^8.21.1"
+  }
+}
