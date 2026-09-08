@@ -1,5 +1,6 @@
 ## Magma
 Kişilerin kendi aralarında güvenli ve hızlı bir şekilde iletişim kurmasına olanak sağlayan tamamen açık kaynaklı bir uygulamadır.
+
 **Not:** *Magma henüz geliştirme aşamasındadır.*
 
 ## ✦ Özellikler
