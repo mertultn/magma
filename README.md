@@ -1,7 +1,7 @@
-# magma
+## Magma
 Kişilerin kendi aralarında güvenli ve hızlı bir şekilde iletişim kurmasına olanak sağlayan tamamen açık kaynaklı bir uygulamadır.
-
 **Not:** *Magma henüz geliştirme aşamasındadır.*
+
 ## ✦ Özellikler
 
 ### Mesajlaşma
@@ -9,10 +9,10 @@ Kişilerin kendi aralarında güvenli ve hızlı bir şekilde iletişim kurması
 - Mesaj geçmişi
 - Mesaj silme/düzenleme
   
-### 👤 Kullanıcılar
+### Kullanıcılar
 - Kullanıcı profilleri
-- kullanıcı durumları
-- doğrudan mesajlaşma
+- Kullanıcı durumları
+- Doğrudan mesajlaşma
 
 ### ⚡ Gerçek Zamanlı
 Magma, iletişimi gerçek zamanlı olarak gerçekleştirir.
@@ -20,4 +20,5 @@ Mesajlar ve kullanıcı durumları bağlantı üzerinden
 anlık olarak güncellenir.
 
 ## Kurulum
-[indirme bağlantısı](magmas.duckdns.org) üzerinden Windows ve Android için indirebilirsiniz.
+[magmas.duckdns.org](https://magmas.duckdns.org) üzerinden Windows için indirebilirsiniz.
+**NOT:** Magma henüz geliştirme aşamasındadır. Bu sebeple şu an yalnızca Windows için indirilebilir. İleride Android ve diğer platformlar için de hazır olacaktır.
