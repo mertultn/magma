@@ -88,6 +88,59 @@
       z-index: 200;
     }
 
+    /* Uygulama açılışta bağlantı kurulana kadar giriş formu yerine bunu
+       gösterir: tamamen siyah zemin, ortada ikon ve dönen bir halka.
+       İnternet olmadığında/koptuğunda da (yeniden bağlanmayı beklerken)
+       kırık görünen, hata metinli giriş formu yerine bu sade ekran görünür. */
+    .connect-splash {
+      position: fixed;
+      inset: 0;
+      background: #000;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      flex-direction: column;
+      gap: 22px;
+      z-index: 300;
+    }
+
+    .connect-splash-icon {
+      width: 96px;
+      height: 96px;
+      border-radius: 22px;
+      overflow: hidden;
+      user-select: none;
+    }
+
+    .connect-splash-icon img {
+      width: 100%;
+      height: 100%;
+      object-fit: cover;
+      display: block;
+    }
+
+    .connect-spinner {
+      width: 30px;
+      height: 30px;
+      border-radius: 50%;
+      border: 3px solid rgba(255, 255, 255, 0.15);
+      border-top-color: #fff;
+      animation: connect-spin 0.8s linear infinite;
+    }
+
+    @keyframes connect-spin {
+      to {
+        transform: rotate(360deg);
+      }
+    }
+
+    .connect-splash-status {
+      color: rgba(255, 255, 255, 0.55);
+      font-size: 13px;
+      max-width: 260px;
+      text-align: center;
+    }
+
     .join-card {
       width: 320px;
       background: var(--surface);
@@ -4450,6 +4503,39 @@
       .settings-panel-sidebar {
         overflow-y: auto !important;
       }
+
+      /* ================= TELEFONDA GEZİNME: sunucu çubuğunu gizle =================
+         Telefon genişliğinde, DM/kanal sohbeti ya da DM listesi açıkken
+         soldaki 72px'lik sunucu çubuğu ekrandan kaybolur; sadece Anasayfa'da
+         görünür. JS bu durumda #app öğesine "mobile-nav-hidden" sınıfını ekler. */
+      .app.mobile-nav-hidden {
+        grid-template-columns: 1fr !important;
+      }
+
+      .app.mobile-nav-hidden .guild-bar-outer {
+        display: none !important;
+      }
+
+      /* DM listesi (çekmece) telefonda artık dar bir panel değil, tüm ekranı
+         kaplayan bir sayfa gibi açılır. */
+      #dmDrawer.active {
+        transform: translateX(0) !important;
+        width: 100vw !important;
+        max-width: 100vw !important;
+        min-width: 0 !important;
+        z-index: 150 !important;
+      }
+
+      /* Telefonda anasayfaya dönmek için kullanılan yüzen buton. */
+      .mobile-home-btn {
+        display: inline-flex !important;
+      }
+    }
+
+    .mobile-home-btn {
+      display: none;
+      align-items: center;
+      justify-content: center;
     }
 
     /* ================= TELEFON BOYUTU: Ayarlar penceresini baştan
@@ -4557,8 +4643,18 @@
 
 <body>
 
+  <!-- BAĞLANMA EKRANI: internet/sunucu bağlantısı kurulana ya da otomatik
+       giriş tamamlanana kadar (ya da bağlantı koptuğunda) görünür. Giriş
+       formu, bağlantı olmadığında kırık/hata dolu görünmesin diye bu ekran
+       öne geçiyor. -->
+  <div class="connect-splash" id="connectSplash">
+    <div class="connect-splash-icon"><img src="magma-icon.png" alt="Magma" onerror="this.style.display='none';"></div>
+    <div class="connect-spinner"></div>
+    <div class="connect-splash-status" id="connectSplashStatus">Bağlanılıyor...</div>
+  </div>
+
   <!-- GİRİŞ / KAYIT -->
-  <div class="join-overlay" id="joinOverlay">
+  <div class="join-overlay" id="joinOverlay" style="display:none;">
     <div class="join-card">
       <div class="join-logo"></div>
       <h1 id="authTitle">Giriş Yap</h1>
@@ -4784,6 +4880,13 @@
     <nav class="channel-drawer hidden" id="dmDrawer">
       <div class="guild-header" style="display:flex;">
         <div style="display:flex;align-items:center;justify-content:space-between;gap:6px;">
+          <button class="topbar-icon-btn mobile-home-btn" id="dmDrawerHomeBtn" title="Anasayfaya dön"
+            style="margin-right:4px;">
+            <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+              stroke-linecap="round" stroke-linejoin="round">
+              <polyline points="15 18 9 12 15 6" />
+            </svg>
+          </button>
           <h1 style="margin-bottom:0;">Mesajlar</h1>
         </div>
       </div>
@@ -4818,6 +4921,12 @@
       <div class="channel-topbar" id="channelTopbar">
         <div class="ch-topbar-scroll" id="channelTopbarScroll"></div>
         <div class="ch-topbar-actions">
+          <button class="topbar-icon-btn mobile-home-btn" id="mobileGuildHomeBtn" title="Anasayfaya dön">
+            <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+              stroke-linecap="round" stroke-linejoin="round">
+              <polyline points="15 18 9 12 15 6" />
+            </svg>
+          </button>
           <button class="topbar-icon-btn" id="guildSettingsBtnTop" title="Sunucu Ayarları">
             <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
               stroke-linecap="round" stroke-linejoin="round">
@@ -5614,6 +5723,8 @@
       let isCreateGuildMode = true;
 
       const joinOverlay = document.getElementById('joinOverlay');
+      const connectSplash = document.getElementById('connectSplash');
+      const connectSplashStatus = document.getElementById('connectSplashStatus');
       const nameInput = document.getElementById('nameInput');
       const passInput = document.getElementById('passInput');
       const loginBtn = document.getElementById('loginBtn');
@@ -5621,6 +5732,17 @@
       const joinStatus = document.getElementById('joinStatus');
 
       const appEl = document.getElementById('app');
+
+      // Telefon genişliğinde (≤768px), bir DM/kanal sohbeti ya da DM listesi
+      // açıkken sunucu çubuğunu (72px) gizleyip ekranı sohbete/listeye
+      // ayırır; masaüstünde bunun hiçbir etkisi yok.
+      function setMobileNavFocus(hidden) {
+        if (window.innerWidth <= 768) {
+          appEl.classList.toggle('mobile-nav-hidden', !!hidden);
+        } else {
+          appEl.classList.remove('mobile-nav-hidden');
+        }
+      }
       const guildBar = document.getElementById('guildBar');
       const addGuildBtn = document.getElementById('addGuildBtn');
       const channelDrawer = document.getElementById('channelDrawer');
@@ -5652,6 +5774,42 @@
       const popoverBanner = document.getElementById('popoverBanner');
       const bannerImageInput = document.getElementById('bannerImageInput');
       const settingsModal = document.getElementById('settingsModal');
+
+      // Ayarlar panelindeki sekme çubuğu telefonda yatay bir şerit oluyor
+      // (bkz. 620px medya sorgusu). Gerçek dokunmatik ekranlarda kaydırma
+      // zaten tarayıcı tarafından sağlanıyor, ama fare/trackpad ile test
+      // ederken (ör. masaüstünde daraltılmış Tauri penceresi) dikey tekerlek
+      // hareketini yataya çevirmemiz ve sürükleyerek kaydırmayı da açıkça
+      // desteklememiz gerekiyor; aksi halde çubuk "kaydırılmıyormuş" gibi
+      // görünüyor.
+      function enableDragWheelScroll(el) {
+        if (!el || el.dataset.dragScrollBound) return;
+        el.dataset.dragScrollBound = '1';
+        el.addEventListener('wheel', (e) => {
+          if (el.scrollWidth <= el.clientWidth) return;
+          const delta = Math.abs(e.deltaX) >= Math.abs(e.deltaY) ? e.deltaX : e.deltaY;
+          if (delta === 0) return;
+          el.scrollLeft += delta;
+          e.preventDefault();
+        }, { passive: false });
+        let dragging = false, startX = 0, startScroll = 0;
+        el.addEventListener('pointerdown', (e) => {
+          if (el.scrollWidth <= el.clientWidth) return;
+          dragging = true;
+          startX = e.clientX;
+          startScroll = el.scrollLeft;
+          el.setPointerCapture(e.pointerId);
+        });
+        el.addEventListener('pointermove', (e) => {
+          if (!dragging) return;
+          el.scrollLeft = startScroll - (e.clientX - startX);
+        });
+        const endDrag = () => { dragging = false; };
+        el.addEventListener('pointerup', endDrag);
+        el.addEventListener('pointercancel', endDrag);
+        el.addEventListener('pointerleave', endDrag);
+      }
+      document.querySelectorAll('.settings-panel-sidebar').forEach(enableDragWheelScroll);
       const settingsAvatarPreview = document.getElementById('settingsAvatarPreview');
       const oldPasswordInput = document.getElementById('oldPasswordInput');
       const settingsPasswordInput = document.getElementById('settingsPasswordInput');
@@ -5937,6 +6095,7 @@
 
       let reconnectAttempt = 0;
       let reconnectTimer = null;
+      let connectWatchdog = null;
 
       function scheduleReconnect() {
         if (reconnectTimer) return;
@@ -5944,6 +6103,7 @@
         const delaySec = Math.min(2 * reconnectAttempt, 15);
         joinStatus.classList.add('error');
         joinStatus.textContent = `Bağlantı koptu, ${delaySec} saniye içinde yeniden denenecek...`;
+        if (connectSplashStatus) connectSplashStatus.textContent = `Bağlantı kurulamadı, ${delaySec} saniye içinde tekrar denenecek (deneme ${reconnectAttempt})...`;
         reconnectTimer = setTimeout(() => {
           reconnectTimer = null;
           const saved = localStorage.getItem('matco_user');
@@ -5955,20 +6115,39 @@
       function connect() {
         joinStatus.classList.remove('error');
         joinStatus.textContent = 'Bağlanılıyor...';
+        if (connectSplashStatus) connectSplashStatus.textContent = 'Bağlanılıyor...';
         setAuthButtonsEnabled(false);
         ws = new WebSocket(`wss://magmas.duckdns.org`);
         ws.binaryType = 'arraybuffer';
 
+        // Bağlantı ne açılırsa açılsın ne de kapanırsa kapansın (askıda
+        // kalırsa) sonsuza kadar beklemeyelim - birkaç saniye içinde
+        // açılmazsa zorla kapatıp yeniden denemeyi tetikliyoruz. Bu sayede
+        // "uygulamayı kapatıp açman gerekiyor" durumuna hiç düşmemesi lazım.
+        if (connectWatchdog) clearTimeout(connectWatchdog);
+        connectWatchdog = setTimeout(() => {
+          if (ws && ws.readyState !== WebSocket.OPEN) {
+            try { ws.close(); } catch (e) { }
+          }
+        }, 7000);
+
         ws.onopen = () => {
+          if (connectWatchdog) { clearTimeout(connectWatchdog); connectWatchdog = null; }
           reconnectAttempt = 0;
           joinStatus.classList.remove('error');
           setAuthButtonsEnabled(true);
           if (autoLoginCreds) {
+            // Otomatik giriş denenirken kullanıcı hiç formu görmesin,
+            // bağlanma ekranı (ikon + dönen halka) açık kalsın.
             joinStatus.textContent = 'Otomatik giriş yapılıyor...';
             pendingAuth = autoLoginCreds;
             ws.send(JSON.stringify({ type: 'login', username: autoLoginCreds.username, password: autoLoginCreds.password }));
             autoLoginCreds = null;
           } else {
+            // Kayıtlı hesap yok: artık gerçekten bağlıyız, elle giriş/kayıt
+            // formunu göster.
+            connectSplash.style.display = 'none';
+            joinOverlay.style.display = 'flex';
             joinStatus.textContent = 'Bağlandı. Giriş yapabilir veya kayıt olabilirsin.';
           }
         };
@@ -5976,12 +6155,20 @@
         ws.onclose = () => {
           if (popoverStatus) { popoverStatus.textContent = 'Bağlantı koptu'; popoverStatus.style.color = 'var(--danger)'; }
           setAuthButtonsEnabled(false);
+          // Bağlantı yokken/koptuğunda kırık görünen giriş formunu değil,
+          // sade bağlanma ekranını göster - tekrar bağlanınca (ws.onopen)
+          // duruma göre form ya da doğrudan uygulama açılır.
+          if (!appEl.classList.contains('show')) {
+            joinOverlay.style.display = 'none';
+            connectSplash.style.display = 'flex';
+          }
           scheduleReconnect();
         };
 
         ws.onerror = () => {
           joinStatus.classList.add('error');
           joinStatus.textContent = 'Sunucuya bağlanılamadı.';
+          if (connectSplashStatus) connectSplashStatus.textContent = 'Sunucuya bağlanılamadı, tekrar denenecek...';
           setAuthButtonsEnabled(false);
         };
 
@@ -6346,6 +6533,11 @@
             incomingCallFrom = { id: msg.fromId, name: msg.fromName, avatar: msg.fromAvatar };
             showCallCard('incoming', msg.fromName, msg.fromAvatar, 'Sizi arıyor...');
             startIncomingRingtone();
+            // Pencere gizli/arka plandayken de (Windows'ta tepsiye küçültülmüş
+            // durumda) gerçek bir telefon çalıyormuş hissi versin diye işletim
+            // sisteminin kendi bildirimini de tetikliyoruz. Uygulama odakta
+            // olsa bile göstermek kasıtlı: bu bir mesaj değil, arama.
+            showOsNotification('Gelen Arama', `${msg.fromName} sizi arıyor...`);
             break;
           }
 
@@ -6444,6 +6636,7 @@
       }
 
       function enterApp() {
+        connectSplash.style.display = 'none';
         joinOverlay.style.display = 'none';
         appEl.classList.add('show');
       }
@@ -7169,6 +7362,11 @@
         // burada listeyi GİZLEMİYOR, açıyoruz (bkz. openDMChatPane'in
         // tam tersi davranışı: bir sohbet açılınca listeyi kapatır).
         if (window.innerWidth <= 768) dmDrawer.classList.add('active');
+        setMobileNavFocus(true);
+        // NOT: dmBackBtn üstteki topbar'da duruyor ve liste (dmDrawer) tam
+        // ekran açıldığında topbar'ın üstünü kapatıyor — bu yüzden listeden
+        // anasayfaya dönüş için dmBackBtn değil, listenin kendi başlığındaki
+        // dmDrawerHomeBtn kullanılıyor (bkz. aşağıdaki addEventListener).
         if (dmBackBtn) dmBackBtn.style.display = 'none';
         homeBtn.classList.remove('active');
         dmNavBtn.classList.add('active');
@@ -7202,8 +7400,16 @@
       if (dmBackBtn) dmBackBtn.addEventListener('click', () => {
         dmDrawer.classList.remove('hidden');
         dmDrawer.classList.add('active');
+        setMobileNavFocus(true);
+        dmBackBtn.style.display = 'none';
         renderDMDrawerList();
       });
+
+      // DM listesinin kendi başlığındaki ev ikonu: liste tam ekran açıkken
+      // topbar'ın (ve oradaki dmBackBtn'in) üstünü kapattığı için anasayfaya
+      // dönüşün tek güvenilir yolu bu buton.
+      const dmDrawerHomeBtn = document.getElementById('dmDrawerHomeBtn');
+      if (dmDrawerHomeBtn) dmDrawerHomeBtn.addEventListener('click', showHomePage);
 
       // Herhangi bir yerden (kullanıcı kartı, arama sonucu, arkadaş listesi,
       // anasayfadaki "Son Sohbetleriniz") bir kullanıcıyla DM açmak için
@@ -7252,6 +7458,7 @@
           dmDrawer.classList.remove('active');
           if (dmBackBtn) dmBackBtn.style.display = 'flex';
         }
+        setMobileNavFocus(true);
 
         viewTitle.textContent = peerName + (blocked ? ' (Engelli)' : '');
         topbarIcon.innerHTML = '';
@@ -7802,7 +8009,17 @@
           try {
             stream = await navigator.mediaDevices.getUserMedia({ audio: true });
           } catch (e) {
-            showToast('Mikrofon izni verilmedi.');
+            // Gerçek hatayı göster: "izin verilmedi" ile "cihaz bulunamadı"
+            // veya "cihaz başka bir uygulama tarafından kullanılıyor" gibi
+            // farklı sorunları birbirinden ayırt edebilelim; hepsini tek bir
+            // genel mesajın arkasına gizlemek asıl nedeni bulmayı imkansız
+            // hale getiriyordu.
+            console.error('getUserMedia hata:', e && e.name, e && e.message);
+            const msg = (e && e.name === 'NotAllowedError') ? 'Mikrofon izni verilmedi.'
+              : (e && e.name === 'NotFoundError') ? 'Mikrofon bulunamadı.'
+                : (e && e.name === 'NotReadableError') ? 'Mikrofona ulaşılamıyor (başka bir uygulama kullanıyor olabilir).'
+                  : `Mikrofon başlatılamadı (${(e && e.name) || 'bilinmeyen hata'}).`;
+            showToast(msg);
             return;
           }
           active = true;
@@ -7997,8 +8214,12 @@
 
       window.logout = function () {
         localStorage.removeItem('matco_user');
-        if (ws) ws.close();
-        location.reload();
+        try { if (ws) ws.close(); } catch (e) { }
+        // ws.close() hemen tamamlanmıyor; aynı anda reload yaparsak bazı
+        // WebView'larda (özellikle Windows) eski bağlantının kapanma
+        // işlemi yarıda kalıp yeni bağlantı denemesini tıkayabiliyordu -
+        // kısa bir gecikme bu yarışı ortadan kaldırıyor.
+        setTimeout(() => location.reload(), 100);
       };
 
       window.openGuildModal = function () {
@@ -8069,6 +8290,7 @@
         if (window.innerWidth <= 768) {
           drawer.classList.remove('active');
         }
+        setMobileNavFocus(true);
         currentChannelId = null;
         channels.clear();
         categories.clear();
@@ -8941,6 +9163,7 @@
         channelDrawer.classList.add('hidden');
         homeBtn.classList.add('active');
         renderGuildBar();
+        setMobileNavFocus(false);
 
         topbar.style.display = 'none';
         setChannelTopbarVisible(false);
@@ -8962,6 +9185,18 @@
       }
 
       homeBtn.addEventListener('click', showHomePage);
+      const mobileGuildHomeBtn = document.getElementById('mobileGuildHomeBtn');
+      if (mobileGuildHomeBtn) mobileGuildHomeBtn.addEventListener('click', showHomePage);
+
+      // Pencere telefon eşiğinin (768px) iki yakası arasında yeniden
+      // boyutlanırsa (ör. Tauri masaüstü penceresi daraltılıp genişletilirse)
+      // sunucu çubuğunun görünürlüğünü mevcut duruma göre yeniden hesapla.
+      window.addEventListener('resize', () => {
+        setMobileNavFocus(!!(dmViewActive || currentGuildId));
+        if (window.innerWidth > 768 && dmBackBtn && dmViewActive && !currentDMPeerId) {
+          dmBackBtn.style.display = 'none';
+        }
+      });
 
       function homeGuildCardHTML(g) {
         return `
