@@ -7,18 +7,152 @@ const { WebSocketServer } = require('ws');
 const { Pool } = require('pg');
 const bcrypt = require('bcrypt');
 
+// ================= ORTAM DEĞİŞKENLERİ DOĞRULAMASI =================
+const REQUIRED_ENV_VARS = ['DATABASE_URL'];
+for (const envVar of REQUIRED_ENV_VARS) {
+    if (!process.env[envVar]) {
+        console.error(`[HATA] Gerekli ortam değişkeni bulunamadı: ${envVar}`);
+        process.exit(1);
+    }
+}
+const NODE_ENV = process.env.NODE_ENV || 'development';
+const IS_PRODUCTION = NODE_ENV === 'production';
+
 // Beklenmeyen bir hata (yakalanmamış exception/promise reddi) tüm sunucuyu
 // çökertip herkesi bağlantıdan düşürmesin diye son bir güvenlik ağı.
-// Normalde her hatayı yukarıda (mesaj bazında) yakalıyoruz, ama olur da
-// kaçan bir tanesi çıkarsa, en azından sunucu ayakta kalmaya devam etsin.
 process.on('unhandledRejection', (err) => {
     console.error('[Yakalanmamış promise hatası]', err);
 });
 process.on('uncaughtException', (err) => {
     console.error('[Yakalanmamış hata]', err);
+    process.exit(1);
 });
 
-// ================= VERİTABANI BAĞLANTISI (PostgreSQL) =================
+// ================= INPUT DOĞRULAMA YARDIMCILARI =================
+function validateUsername(username) {
+    if (typeof username !== 'string') return null;
+    const trimmed = username.trim().slice(0, 32);
+    return /^[a-zA-Z0-9_]{1,32}$/.test(trimmed) ? trimmed : null;
+}
+
+function validatePassword(password) {
+    return typeof password === 'string' && password.length >= 6 && password.length <= 128;
+}
+
+function validateEmail(email) {
+    return typeof email === 'string' && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
+}
+
+function sanitizeText(text, maxLength = 2000) {
+    if (typeof text !== 'string') return '';
+    return text.trim().slice(0, maxLength);
+}
+
+function sanitizeHtml(html) {
+    if (typeof html !== 'string') return '';
+    return html.replace(/[<>"'&]/g, char => ({
+        '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;', '&': '&amp;'
+    }[char]));
+}
+
+function sendError(ws, message, code = 400) {
+    const errorMsg = IS_PRODUCTION ? 'Sunucu hatası oluştu.' : message;
+    send(ws, { type: 'error', message: errorMsg, code });
+}
+
+// ================= RATE LIMITING (Brute Force Korusu) =================
+const RATE_LIMIT_MAX_MESSAGES = 30;  // 30 saniyede max mesaj
+const RATE_LIMIT_WINDOW_MS = 30000;  // 30 saniye penceresi
+const RATE_LIMIT_AUTH_MAX = 5;       // 30 saniyede max 5 login denemesi
+
+class RateLimiter {
+    constructor(maxRequests, windowMs) {
+        this.maxRequests = maxRequests;
+        this.windowMs = windowMs;
+        this.requests = new Map();
+    }
+
+    isLimited(id) {
+        const now = Date.now();
+        if (!this.requests.has(id)) {
+            this.requests.set(id, [now]);
+            return false;
+        }
+        let timestamps = this.requests.get(id);
+        timestamps = timestamps.filter(t => now - t < this.windowMs);
+
+        if (timestamps.length >= this.maxRequests) {
+            this.requests.set(id, timestamps);
+            return true;
+        }
+
+        timestamps.push(now);
+        this.requests.set(id, timestamps);
+        return false;
+    }
+
+    reset(id) {
+        this.requests.delete(id);
+    }
+}
+
+const rateLimitGeneral = new RateLimiter(RATE_LIMIT_MAX_MESSAGES, RATE_LIMIT_WINDOW_MS);
+const rateLimitAuth = new RateLimiter(RATE_LIMIT_AUTH_MAX, RATE_LIMIT_WINDOW_MS);
+
+// ================= CORS ORIGINS WHITELIST =================
+const ALLOWED_ORIGINS = (
+    process.env.CORS_ORIGINS ?
+        process.env.CORS_ORIGINS.split(',').map(o => o.trim()) :
+        ['http://localhost:3000', 'http://localhost:5173', 'http://localhost:7777']
+);
+
+function isOriginAllowed(origin) {
+    if (IS_PRODUCTION && process.env.CORS_ORIGINS) {
+        return ALLOWED_ORIGINS.includes(origin);
+    }
+    // Development'da tüm localhost'ları izin ver
+    return !IS_PRODUCTION || origin?.includes('localhost') || origin?.includes('127.0.0.1');
+}
+
+// ================= MESSAGE TYPE WHITELIST =================
+const ALLOWED_MESSAGE_TYPES = new Set([
+    'register', 'login', 'logout',
+    'get-notification-prefs', 'set-notification-prefs', 'set-guild-notification-pref', 'set-channel-notification-pref',
+    'discover', 'search', 'join-guild-direct', 'join-guild',
+    'create-guild', 'update-guild', 'delete-guild', 'leave-guild',
+    'create-category', 'update-category', 'delete-category',
+    'create-channel', 'delete-channel', 'update-channel',
+    'select-channel', 'select-guild', 'chat', 'edit-message', 'delete-message', 'pin-message', 'unpin-message',
+    'update-profile', 'friend-request', 'accept-friend-request', 'deny-friend-request', 'remove-friend',
+    'block-user', 'unblock-user', 'block-list',
+    'dm-send', 'dm-message', 'dm-edit', 'dm-delete', 'dm-pin', 'dm-unpin',
+    'dm-conversations', 'dm-history', 'dm-set-read', 'dm-hide', 'dm-unhide', 'dm-settings',
+    'select-voice-channel', 'leave-voice-channel', 'mute', 'unmute',
+    'ban-member', 'unban-member', 'kick-member', 'promote-member', 'demote-member',
+    'history', 'pinned-messages',
+]);
+
+function isValidUserId(id) {
+    return typeof id === 'number' && id > 0 && Number.isInteger(id);
+}
+
+function isValidGuildId(id) {
+    return typeof id === 'number' && id > 0 && Number.isInteger(id);
+}
+
+function isValidChannelId(id) {
+    return typeof id === 'number' && id > 0 && Number.isInteger(id);
+}
+
+// Permission checker: admin ya da owner mutü
+function isOwnerOrAdmin(membership) {
+    return membership && (membership.role === 'owner' || membership.role === 'admin');
+}
+
+// Permission checker: sadece owner
+function isOwner(membership) {
+    return membership && membership.role === 'owner';
+}
 // DATABASE_URL ortam değişkeninden okunuyor (Render Postgres "Internal
 // Database URL" veya başka bir Postgres sağlayıcısının connection string'i).
 if (!process.env.DATABASE_URL) {
@@ -603,27 +737,49 @@ async function canSendDM(fromId, toId) {
 }
 
 // ================= HTTP (STATİK DOSYA SUNUMU) =================
-const httpServer = http.createServer((req, res) => {
-    let reqPath = decodeURIComponent(req.url.split('?')[0]);
-    if (reqPath === '/') reqPath = '/index.html';
-    const filePath = path.join(PUBLIC_DIR, reqPath);
+// CORS Headers
+res.setHeader('Access-Control-Allow-Origin', '*');
+res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
+res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+res.setHeader('Access-Control-Max-Age', '86400');
 
-    if (!filePath.startsWith(PUBLIC_DIR)) {
-        res.writeHead(403);
-        res.end('Forbidden');
+// Security Headers
+res.setHeader('X-Content-Type-Options', 'nosniff');
+res.setHeader('X-Frame-Options', 'DENY');
+res.setHeader('X-XSS-Protection', '1; mode=block');
+res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
+res.setHeader('Permissions-Policy', 'geolocation=(), microphone=(), camera=()');
+if (IS_PRODUCTION) {
+    res.setHeader('Strict-Transport-Security', 'max-age=31536000; includeSubDomains');
+    res.setHeader('Content-Security-Policy', "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src 'self' ws: wss:");
+}
+
+// OPTIONS isteğine cevap ver
+if (req.method === 'OPTIONS') {
+    res.writeHead(200);
+    res.end();
+    return;
+}
+
+let reqPath = decodeURIComponent(req.url.split('?')[0]);
+if (reqPath === '/') reqPath = '/index.html';
+const filePath = path.join(PUBLIC_DIR, reqPath);
+
+if (!filePath.startsWith(PUBLIC_DIR)) {
+    res.writeHead(403, { 'Content-Type': 'text/plain' });
+    res.end('Forbidden');
+    return;
+}
+
+fs.readFile(filePath, (err, data) => {
+    if (err) {
+        res.writeHead(200, { 'Content-Type': 'text/plain' });
+        res.end('Magma server is running.\n');
         return;
     }
-
-    fs.readFile(filePath, (err, data) => {
-        if (err) {
-            res.writeHead(200, { 'Content-Type': 'text/plain' });
-            res.end('Magma server is running.\n');
-            return;
-        }
-        const ext = path.extname(filePath);
-        res.writeHead(200, { 'Content-Type': MIME_TYPES[ext] || 'application/octet-stream' });
-        res.end(data);
-    });
+    const ext = path.extname(filePath);
+    res.writeHead(200, { 'Content-Type': MIME_TYPES[ext] || 'application/octet-stream' });
+    res.end(data);
 });
 
 const wss = new WebSocketServer({ server: httpServer });
@@ -860,43 +1016,89 @@ wss.on('connection', (ws) => {
             return;
         }
 
-        let msg;
         try {
             msg = JSON.parse(data.toString('utf8'));
         } catch {
             return;
         }
-        console.log('Gelen mesaj:', msg);
+
+        // Rate limiting kontrolü
+        if (rateLimitGeneral.isLimited(id)) {
+            sendError(ws, 'Limit aşıldınız. Daha yavaş gönderen mesaj gönderin.');
+            return;
+        }
+
+        // Message type validation
+        if (!msg.type || !isValidMessageType(msg.type)) {
+            console.warn(`[Güvenlik] Geçersiz message type: ${msg.type} (ID: ${id})`);
+            return;
+        }
+
+        console.log('Gelen mesaj:', msg.type);
 
         try {
             // ---------- KİMLİK DOĞRULAMA ----------
             if (msg.type === 'register') {
-                const username = String(msg.username || '').trim().slice(0, 32);
+                // Auth rate limiting
+                const clientIp = ws._socket?.remoteAddress || id.toString();
+                if (rateLimitAuth.isLimited(clientIp)) {
+                    sendError(ws, 'Çok fazla kayıt denemesi. Lütfen daha sonra tekrar deneyin.');
+                    return;
+                }
+
+                const username = validateUsername(msg.username);
                 const password = String(msg.password || '');
-                if (!username || !password) { send(ws, { type: 'auth-error', message: 'Kullanıcı adı ve şifre gerekli.' }); return; }
+
+                if (!username) {
+                    sendError(ws, 'Geçersiz kullanıcı adı. 1-32 alfanümerik karakter ve alt çizgi kullanın.');
+                    return;
+                }
+                if (!validatePassword(password)) {
+                    sendError(ws, 'Şifre 6-128 karakter arasında olmalıdır.');
+                    return;
+                }
+
                 try {
                     const hash = bcrypt.hashSync(password, 10);
                     await registerUserStmt.run(username, hash);
-                    send(ws, { type: 'auth-success', message: 'Kayıt başarılı!' });
+                    rateLimitAuth.reset(clientIp);
                 } catch (e) {
-                    send(ws, { type: 'auth-error', message: 'Bu kullanıcı adı zaten alınmış.' });
+                    console.error('[Register hatası]', e.message);
+                    sendError(ws, 'Bu kullanıcı adı zaten kullanılıyor.');
                 }
                 return;
             }
 
             if (msg.type === 'login') {
-                const username = String(msg.username || '').trim();
-                const password = String(msg.password || '');
-                const user = await findUserByName.get(username);
-                if (user && bcrypt.compareSync(password, user.password)) {
-                    // Bu kullanıcının başka aktif bağlantısı var mı (zaten çevrimiçiydi mi)?
-                    // Yoksa bu, "çevrimiçi oldu" anı demektir.
-                    const wasAlreadyOnline = [...clients.values()].some(c => c.userId === user.id);
+                // Auth rate limiting
+                const clientIp = ws._socket?.remoteAddress || id.toString();
+                if (rateLimitAuth.isLimited(clientIp)) {
+                    sendError(ws, 'Çok fazla giriş denemesi. Lütfen daha sonra tekrar deneyin.');
+                    return;
+                }
 
+                const username = validateUsername(msg.username);
+                const password = String(msg.password || '');
+
+                if (!username || !password) {
+                    sendError(ws, 'Kullanıcı adı ve şifre gereklidir.');
+                    return;
+                }
+
+                try {
+                    const user = await findUserByName.get(username);
+                    if (!user || !bcrypt.compareSync(password, user.password)) {
+                        sendError(ws, 'Geçersiz kimlik bilgileri.');
+                        return;
+                    }
+
+                    const wasAlreadyOnline = [...clients.values()].some(c => c.userId === user.id);
                     state.userId = user.id;
                     state.username = user.username;
                     state.avatar = user.avatar || null;
                     state.banner = user.banner || null;
+                    rateLimitAuth.reset(clientIp);
+
                     send(ws, { type: 'welcome', id, userId: user.id, username: user.username, avatar: user.avatar || null, banner: user.banner || null, createdAt: user.created_at || null });
                     send(ws, { type: 'guild-list', guilds: await userGuilds.all(user.id) });
                     console.log(`[+] ${user.username} giriş yaptı (#${id})`);
@@ -904,8 +1106,9 @@ wss.on('connection', (ws) => {
                     if (!wasAlreadyOnline) {
                         notifySharedGuildMembersOnline(user.id, user.username).catch(err => console.error('[Presence bildirimi gönderilemedi]', err));
                     }
-                } else {
-                    send(ws, { type: 'auth-error', message: 'Kullanıcı adı veya şifre hatalı.' });
+                } catch (e) {
+                    console.error('[Login hatası]', e.message);
+                    sendError(ws, 'Giriş sırasında bir hata oluştu.');
                 }
                 return;
             }
@@ -1459,10 +1662,18 @@ wss.on('connection', (ws) => {
 
             // ---------- SUNUCU (GUILD) YÖNETİMİ ----------
             if (msg.type === 'create-guild') {
-                const name = String(msg.name || '').trim().slice(0, 50);
-                if (!name) return;
-                await createGuildWithDefaults(name, state.userId);
-                send(ws, { type: 'guild-list', guilds: await userGuilds.all(state.userId) });
+                const name = sanitizeText(msg.name, 50);
+                if (!name || name.length < 1) {
+                    sendError(ws, 'Sunucu adı boş olamaz.');
+                    return;
+                }
+                try {
+                    await createGuildWithDefaults(name, state.userId);
+                    send(ws, { type: 'guild-list', guilds: await userGuilds.all(state.userId) });
+                } catch (e) {
+                    console.error('[Guild oluştur hata]', e.message);
+                    sendError(ws, 'Sunucu oluşturulurken hata oluştu.');
+                }
                 return;
             }
 
@@ -1560,96 +1771,122 @@ wss.on('connection', (ws) => {
             }
 
             if (msg.type === 'kick-member') {
-                const membership = await findMembership.get(msg.guildId, state.userId);
-                if (!membership || (membership.role !== 'owner' && membership.role !== 'admin')) {
-                    send(ws, { type: 'error', message: 'Üye atmak için yetkin yok.' });
+                if (!isValidGuildId(msg.guildId) || !isValidUserId(msg.userId)) {
+                    sendError(ws, 'Geçersiz parametre.');
                     return;
                 }
-                if (msg.userId === state.userId) { send(ws, { type: 'error', message: 'Kendini atamazsın.' }); return; }
-                const target = await findMembership.get(msg.guildId, msg.userId);
-                if (!target) { send(ws, { type: 'error', message: 'Üye bulunamadı.' }); return; }
-                if (target.role === 'owner') {
-                    send(ws, { type: 'error', message: 'Sunucu sahibi atılamaz.' });
-                    return;
-                }
-                if (membership.role === 'admin' && target.role !== 'member') {
-                    send(ws, { type: 'error', message: 'Sadece normal üyeleri sunucudan atabilirsin.' });
-                    return;
-                }
-                await removeMemberStmt.run(msg.guildId, msg.userId);
-                // Opsiyonel: belirli bir süre boyunca sunucuya tekrar girememesi için
-                // geçici bir yasak kaydı oluştur (0/boş = süresiz kick, hemen tekrar girebilir).
-                const kickDurationMinutes = Number(msg.durationMinutes) || 0;
-                if (kickDurationMinutes > 0) {
-                    const targetUser = await findUserById.get(msg.userId);
-                    const expiresAt = new Date(Date.now() + kickDurationMinutes * 60 * 1000);
-                    await insertBan.run(msg.guildId, msg.userId, targetUser ? targetUser.username : '?', expiresAt);
-                }
-                await sendMemberListToGuild(msg.guildId);
-                for (const [cid, c] of clients) {
-                    if (c.userId === msg.userId) {
-                        if (c.voiceChannelId) {
-                            const ch = await findChannelById.get(c.voiceChannelId);
-                            if (ch && ch.guild_id === msg.guildId) {
-                                const oldVoiceChannelId = c.voiceChannelId;
-                                c.voiceChannelId = null;
-                                broadcastToChannel(oldVoiceChannelId, { type: 'voice-users', channelId: oldVoiceChannelId, users: voiceUsersPayload(oldVoiceChannelId) }, undefined);
-                            }
-                        }
-                        send(c.ws, { type: 'kicked', guildId: msg.guildId });
-                        send(c.ws, { type: 'guild-list', guilds: await userGuilds.all(c.userId) });
-                        if (c.guildId === msg.guildId) { c.guildId = null; c.channelId = null; }
+                try {
+                    const membership = await findMembership.get(msg.guildId, state.userId);
+                    if (!isOwnerOrAdmin(membership)) {
+                        sendError(ws, 'Üye atmak için yetkin yok.');
+                        return;
                     }
+                    if (msg.userId === state.userId) {
+                        sendError(ws, 'Kendini atamazsın.');
+                        return;
+                    }
+                    const target = await findMembership.get(msg.guildId, msg.userId);
+                    if (!target) {
+                        sendError(ws, 'Üye bulunamadı.');
+                        return;
+                    }
+                    if (target.role === 'owner') {
+                        sendError(ws, 'Sunucu sahibi atılamaz.');
+                        return;
+                    }
+                    if (membership.role === 'admin' && target.role !== 'member') {
+                        sendError(ws, 'Sadece normal üyeleri sunucudan atabilirsin.');
+                        return;
+                    }
+                    await removeMemberStmt.run(msg.guildId, msg.userId);
+                    const kickDurationMinutes = Number(msg.durationMinutes) || 0;
+                    if (kickDurationMinutes > 0 && kickDurationMinutes <= 10080) { // Max 7 gün
+                        const targetUser = await findUserById.get(msg.userId);
+                        const expiresAt = new Date(Date.now() + kickDurationMinutes * 60 * 1000);
+                        await insertBan.run(msg.guildId, msg.userId, targetUser ? targetUser.username : '?', expiresAt);
+                    }
+                    await sendMemberListToGuild(msg.guildId);
+                    for (const [cid, c] of clients) {
+                        if (c.userId === msg.userId) {
+                            if (c.voiceChannelId) {
+                                const ch = await findChannelById.get(c.voiceChannelId);
+                                if (ch && ch.guild_id === msg.guildId) {
+                                    const oldVoiceChannelId = c.voiceChannelId;
+                                    c.voiceChannelId = null;
+                                    broadcastToChannel(oldVoiceChannelId, { type: 'voice-users', channelId: oldVoiceChannelId, users: voiceUsersPayload(oldVoiceChannelId) }, undefined);
+                                }
+                            }
+                            send(c.ws, { type: 'kicked', guildId: msg.guildId });
+                            send(c.ws, { type: 'guild-list', guilds: await userGuilds.all(c.userId) });
+                            if (c.guildId === msg.guildId) { c.guildId = null; c.channelId = null; }
+                        }
+                    }
+                } catch (e) {
+                    console.error('[Kick member hata]', e.message);
+                    sendError(ws, 'Üye atılırken hata oluştu.');
                 }
                 return;
             }
 
             if (msg.type === 'ban-member') {
-                const membership = await findMembership.get(msg.guildId, state.userId);
-                if (!membership || (membership.role !== 'owner' && membership.role !== 'admin')) {
-                    send(ws, { type: 'error', message: 'Yasaklamak için yetkin yok.' });
+                if (!isValidGuildId(msg.guildId) || !isValidUserId(msg.userId)) {
+                    sendError(ws, 'Geçersiz parametre.');
                     return;
                 }
-                if (msg.userId === state.userId) { send(ws, { type: 'error', message: 'Kendini yasaklayamazsın.' }); return; }
-                const target = await findMembership.get(msg.guildId, msg.userId);
-                if (target && target.role === 'owner') {
-                    send(ws, { type: 'error', message: 'Sunucu sahibi yasaklanamaz.' });
-                    return;
-                }
-                if (membership.role === 'admin' && target && target.role !== 'member') {
-                    send(ws, { type: 'error', message: 'Sadece normal üyeleri yasaklayabilirsin.' });
-                    return;
-                }
-                const targetUser = await findUserById.get(msg.userId);
-                await insertBan.run(msg.guildId, msg.userId, targetUser ? targetUser.username : '?', null);
-                await removeMemberStmt.run(msg.guildId, msg.userId);
-                await sendMemberListToGuild(msg.guildId);
-                for (const [cid, c] of clients) {
-                    if (c.userId === msg.userId) {
-                        if (c.voiceChannelId) {
-                            const ch = await findChannelById.get(c.voiceChannelId);
-                            if (ch && ch.guild_id === msg.guildId) {
-                                const oldVoiceChannelId = c.voiceChannelId;
-                                c.voiceChannelId = null;
-                                broadcastToChannel(oldVoiceChannelId, { type: 'voice-users', channelId: oldVoiceChannelId, users: voiceUsersPayload(oldVoiceChannelId) }, undefined);
-                            }
-                        }
-                        send(c.ws, { type: 'kicked', guildId: msg.guildId });
-                        send(c.ws, { type: 'guild-list', guilds: await userGuilds.all(c.userId) });
-                        if (c.guildId === msg.guildId) { c.guildId = null; c.channelId = null; }
+                try {
+                    const membership = await findMembership.get(msg.guildId, state.userId);
+                    if (!isOwnerOrAdmin(membership)) {
+                        sendError(ws, 'Yasaklamak için yetkin yok.');
+                        return;
                     }
+                    if (msg.userId === state.userId) { sendError(ws, 'Kendini yasaklayamazsın.'); return; }
+                    const target = await findMembership.get(msg.guildId, msg.userId);
+                    if (target && target.role === 'owner') {
+                        sendError(ws, 'Sunucu sahibi yasaklanamaz.');
+                        return;
+                    }
+                    if (membership.role === 'admin' && target && target.role !== 'member') {
+                        sendError(ws, 'Sadece normal üyeleri yasaklayabilirsin.');
+                        return;
+                    }
+                    const targetUser = await findUserById.get(msg.userId);
+                    const banDurationMinutes = Number(msg.durationMinutes) || null;
+                    const expiresAt = banDurationMinutes && banDurationMinutes > 0 ? new Date(Date.now() + Math.min(banDurationMinutes, 10080) * 60 * 1000) : null;
+                    await insertBan.run(msg.guildId, msg.userId, targetUser ? targetUser.username : '?', expiresAt);
+                    await removeMemberStmt.run(msg.guildId, msg.userId);
+                    console.log(`[Yasak] ${targetUser?.username || msg.userId} sunucudan yasaklandı`);
+                    await sendMemberListToGuild(msg.guildId);
+                    for (const [cid, c] of clients) {
+                        if (c.userId === msg.userId && c.guildId === msg.guildId) {
+                            send(c.ws, { type: 'banned', guildId: msg.guildId });
+                            send(c.ws, { type: 'guild-list', guilds: await userGuilds.all(c.userId) });
+                            c.guildId = null; c.channelId = null;
+                        }
+                    }
+                } catch (e) {
+                    console.error('[Ban member hata]', e.message);
+                    sendError(ws, 'Üye yasaklanırken hata oluştu.');
                 }
                 return;
             }
 
             if (msg.type === 'unban-member') {
-                const membership = await findMembership.get(msg.guildId, state.userId);
-                if (!membership || (membership.role !== 'owner' && membership.role !== 'admin')) {
-                    send(ws, { type: 'error', message: 'Yasağı kaldırmak için yetkin yok.' });
+                if (!isValidGuildId(msg.guildId) || !isValidUserId(msg.userId)) {
+                    sendError(ws, 'Geçersiz parametre.');
                     return;
                 }
-                await removeBan.run(msg.guildId, msg.userId);
-                send(ws, { type: 'ban-list', guildId: msg.guildId, bans: await guildBansStmt.all(msg.guildId) });
+                try {
+                    const membership = await findMembership.get(msg.guildId, state.userId);
+                    if (!isOwnerOrAdmin(membership)) {
+                        sendError(ws, 'Yasağı kaldırmak için yetkin yok.');
+                        return;
+                    }
+                    await removeBan.run(msg.guildId, msg.userId);
+                    send(ws, { type: 'ban-list', guildId: msg.guildId, bans: await guildBansStmt.all(msg.guildId) });
+                } catch (e) {
+                    console.error('[Unban member hata]', e.message);
+                    sendError(ws, 'Yasak kaldırılırken hata oluştu.');
+                }
                 return;
             }
 
@@ -1685,27 +1922,36 @@ wss.on('connection', (ws) => {
             }
 
             if (msg.type === 'delete-guild') {
-                const membership = await findMembership.get(msg.guildId, state.userId);
-                if (!membership || membership.role !== 'owner') {
-                    send(ws, { type: 'error', message: 'Sunucuyu silmek için sahibi olmalısın.' });
+                if (!isValidGuildId(msg.guildId)) {
+                    sendError(ws, 'Geçersiz sunucu ID.');
                     return;
                 }
-                const memberIds = (await guildMembersStmt.all(msg.guildId)).map(m => m.id);
-                await deleteGuildMessagesStmt.run(msg.guildId);
-                await deleteGuildChannelsStmt.run(msg.guildId);
-                await deleteGuildMembersStmt.run(msg.guildId);
-                await deleteGuildBansStmt.run(msg.guildId);
-                await deleteGuildStmt.run(msg.guildId);
-                for (const [cid, c] of clients) {
-                    if (c.guildId === msg.guildId) { c.guildId = null; c.channelId = null; }
-                    if (c.voiceChannelId) {
-                        const ch = await findChannelById.get(c.voiceChannelId);
-                        if (!ch) c.voiceChannelId = null;
+                try {
+                    const membership = await findMembership.get(msg.guildId, state.userId);
+                    if (!isOwner(membership)) {
+                        sendError(ws, 'Sunucuyu silmek için sahibi olmalısın.');
+                        return;
                     }
-                    if (c.userId && memberIds.includes(c.userId)) {
-                        send(c.ws, { type: 'guild-deleted', guildId: msg.guildId });
-                        send(c.ws, { type: 'guild-list', guilds: await userGuilds.all(c.userId) });
+                    const memberIds = (await guildMembersStmt.all(msg.guildId)).map(m => m.id);
+                    await deleteGuildMessagesStmt.run(msg.guildId);
+                    await deleteGuildChannelsStmt.run(msg.guildId);
+                    await deleteGuildMembersStmt.run(msg.guildId);
+                    await deleteGuildBansStmt.run(msg.guildId);
+                    await deleteGuildStmt.run(msg.guildId);
+                    for (const [cid, c] of clients) {
+                        if (c.guildId === msg.guildId) { c.guildId = null; c.channelId = null; }
+                        if (c.voiceChannelId) {
+                            const ch = await findChannelById.get(c.voiceChannelId);
+                            if (!ch) c.voiceChannelId = null;
+                        }
+                        if (c.userId && memberIds.includes(c.userId)) {
+                            send(c.ws, { type: 'guild-deleted', guildId: msg.guildId });
+                            send(c.ws, { type: 'guild-list', guilds: await userGuilds.all(c.userId) });
+                        }
                     }
+                } catch (e) {
+                    console.error('[Sunucu sil hata]', e.message);
+                    sendError(ws, 'Sunucu silinirken hata oluştu.');
                 }
                 return;
             }
@@ -1740,21 +1986,29 @@ wss.on('connection', (ws) => {
 
             // ---------- KANAL YÖNETİMİ (sahip + yönetici) ----------
             if (msg.type === 'create-channel') {
-                const membership = await findMembership.get(msg.guildId, state.userId);
-                if (!canManageChannels(membership)) {
-                    send(ws, { type: 'error', message: 'Kanal oluşturmak için yetkin yok.' });
-                    return;
+                try {
+                    const membership = await findMembership.get(msg.guildId, state.userId);
+                    if (!canManageChannels(membership)) {
+                        sendError(ws, 'Kanal oluşturmak için yetkin yok.');
+                        return;
+                    }
+                    const name = sanitizeText(msg.name, 40);
+                    if (!name || name.length < 1) {
+                        sendError(ws, 'Kanal adı boş olamaz.');
+                        return;
+                    }
+                    const chType = msg.channelType === 'voice' ? 'voice' : 'text';
+                    let categoryId = null;
+                    if (msg.categoryId) {
+                        const cat = await findCategoryById.get(msg.categoryId);
+                        if (cat && cat.guild_id === msg.guildId) categoryId = cat.id;
+                    }
+                    await insertChannel.run(msg.guildId, name, chType, 0, categoryId);
+                    await broadcastChannelList(msg.guildId);
+                } catch (e) {
+                    console.error('[Kanal oluştur hata]', e.message);
+                    sendError(ws, 'Kanal oluşturulurken hata oluştu.');
                 }
-                const name = String(msg.name || '').trim().slice(0, 40);
-                const chType = msg.channelType === 'voice' ? 'voice' : 'text';
-                if (!name) return;
-                let categoryId = null;
-                if (msg.categoryId) {
-                    const cat = await findCategoryById.get(msg.categoryId);
-                    if (cat && cat.guild_id === msg.guildId) categoryId = cat.id;
-                }
-                await insertChannel.run(msg.guildId, name, chType, 0, categoryId);
-                await broadcastChannelList(msg.guildId);
                 return;
             }
 
@@ -1789,39 +2043,51 @@ wss.on('connection', (ws) => {
 
             if (msg.type === 'chat') {
                 if (!state.channelId) return;
-                const text = String(msg.text || '').slice(0, 1000);
+                const text = sanitizeText(msg.text, 2000);
                 let attachmentData = null, attachmentType = null, attachmentName = null;
+
                 if (msg.attachment && typeof msg.attachment === 'string' && msg.attachment.startsWith('data:')) {
                     if (msg.attachment.length > MAX_ATTACHMENT_DATAURL_LENGTH) {
-                        send(ws, { type: 'error', message: 'Dosya çok büyük.' });
+                        sendError(ws, 'Dosya çok büyük.');
                         return;
                     }
                     attachmentData = msg.attachment;
-                    attachmentType = String(msg.attachmentType || 'application/octet-stream').slice(0, 200);
-                    attachmentName = String(msg.attachmentName || 'dosya').slice(0, 200);
+                    attachmentType = String(msg.attachmentType || 'application/octet-stream').slice(0, 100);
+                    // MIME type validation
+                    if (!/^[a-z]+\/[a-z0-9+\-.]+$/.test(attachmentType)) {
+                        attachmentType = 'application/octet-stream';
+                    }
+                    attachmentName = sanitizeText(msg.attachmentName || 'dosya', 200);
                 }
-                if (!text && !attachmentData) return;
-                const info = await insertMessage.run(state.channelId, state.username, state.userId, text, attachmentData, attachmentType, attachmentName);
-                broadcastToChannel(state.channelId, {
-                    type: 'chat', channelId: state.channelId, id: info.lastInsertRowid, userId: state.userId, name: state.username,
-                    avatar: state.avatar || null, text, ts: Date.now(),
-                    attachment: attachmentData, attachmentType, attachmentName,
-                }, undefined);
 
-                // Kanalı o an açık olmasa bile, sunucudaki ilgili üyelere bildirim gönder.
-                const channelForNotif = await findChannelById.get(state.channelId);
-                if (channelForNotif) {
-                    const guildForNotif = await findGuildById.get(channelForNotif.guild_id);
-                    notifyGuildOfNewMessage({
-                        guildId: channelForNotif.guild_id,
-                        guildName: guildForNotif ? guildForNotif.name : '',
-                        channelId: state.channelId,
-                        channelName: channelForNotif.name,
-                        senderUserId: state.userId,
-                        senderName: state.username,
-                        senderAvatar: state.avatar || null,
-                        text: text || (attachmentData ? '📎 Dosya gönderildi' : ''),
-                    }).catch(err => console.error('[Bildirim gönderilemedi]', err));
+                if (!text && !attachmentData) return;
+
+                try {
+                    const info = await insertMessage.run(state.channelId, state.username, state.userId, text, attachmentData, attachmentType, attachmentName);
+                    broadcastToChannel(state.channelId, {
+                        type: 'chat', channelId: state.channelId, id: info.lastInsertRowid, userId: state.userId, name: state.username,
+                        avatar: state.avatar || null, text, ts: Date.now(),
+                        attachment: attachmentData, attachmentType, attachmentName,
+                    }, undefined);
+
+                    // Kanalı o an açık olmasa bile, sunucudaki ilgili üyelere bildirim gönder.
+                    const channelForNotif = await findChannelById.get(state.channelId);
+                    if (channelForNotif) {
+                        const guildForNotif = await findGuildById.get(channelForNotif.guild_id);
+                        notifyGuildOfNewMessage({
+                            guildId: channelForNotif.guild_id,
+                            guildName: guildForNotif ? guildForNotif.name : '',
+                            channelId: state.channelId,
+                            channelName: channelForNotif.name,
+                            senderUserId: state.userId,
+                            senderName: state.username,
+                            senderAvatar: state.avatar || null,
+                            text: text || (attachmentData ? '📎 Dosya gönderildi' : ''),
+                        }).catch(err => console.error('[Bildirim gönderilemedi]', err));
+                    }
+                } catch (e) {
+                    console.error('[Mesaj gönder hata]', e.message);
+                    sendError(ws, 'Mesaj gönderilemedi.');
                 }
                 return;
             }
